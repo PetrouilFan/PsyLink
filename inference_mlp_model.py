@@ -11,7 +11,7 @@ from eeg_buffer import EEGBuffer
 import os
 import pandas as pd
 import traceback  # Add for detailed error tracing
-
+import torch.nn.functional as F
 # Model constants - must match training parameters
 HIDDEN_SIZES = [128, 64, 32]
 DROPOUT_RATE = 0.2
@@ -56,9 +56,15 @@ class MLPModel(nn.Module):
         self.hidden_layers = nn.Sequential(*layers)
         self.output_layer = nn.Linear(hidden_sizes[-1], num_classes)
         
-    def forward(self, x):
+    def forward(self, x, apply_softmax=False):
         x = self.hidden_layers(x)
         x = self.output_layer(x)
+        
+        # Apply softmax for prediction but not during training
+        # (CrossEntropyLoss expects raw logits)
+        if apply_softmax:
+            x = F.softmax(x, dim=1)
+        
         return x
 
 def apply_filter(data, window_size):
@@ -132,10 +138,11 @@ def test_model_prediction(model, scaler_params, sample_data):
         print(f"Input tensor shape: {features_tensor.shape}")
         
         with torch.no_grad():
-            outputs = model(features_tensor)
-            print(f"Raw model output: {outputs}")
+            # Update to use apply_softmax=True
+            outputs = model(features_tensor, apply_softmax=True)
+            print(f"Model output (with softmax): {outputs}")
             
-            probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
+            probabilities = outputs[0]  # Softmax already applied
             print(f"Probabilities: {probabilities}")
             
             confidence, class_idx = torch.max(probabilities, 0)
@@ -395,11 +402,14 @@ def main():
                         # Get prediction
                         with torch.no_grad():
                             try:
-                                outputs = model(features_tensor)
-                                probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
+                                # Update to use apply_softmax=True
+                                outputs = model(features_tensor, apply_softmax=True)
+                                
+                                # Probabilities are now directly in outputs (softmax already applied)
+                                probabilities = outputs[0]
                                 
                                 # Print raw model outputs for debugging
-                                print(f"Raw model output: {outputs.numpy()}")
+                                print(f"Model output (with softmax): {outputs.numpy()}")
                                 print(f"Probabilities: {probabilities.numpy()}")
                                 
                                 # Get predicted class and confidences
