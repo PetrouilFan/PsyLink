@@ -1,3 +1,5 @@
 __pycache__
 datasets
 models
+mlp_model.pth
+training_loss.png
