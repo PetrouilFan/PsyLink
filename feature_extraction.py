@@ -9,9 +9,134 @@ DEFAULT_HIGHPASS_CUTOFF = 1.0
 DEFAULT_LOWPASS_CUTOFF = 50.0
 DEFAULT_NOTCH_FREQ = 50.0  # For power line interference
 
+# Default window parameters
+DEFAULT_WINDOW_SIZE = 250  # 1 second at 250Hz sampling rate
+DEFAULT_OVERLAP = 0.5      # 50% overlap
+
+def extract_features_with_windows(eeg_data, window_size=DEFAULT_WINDOW_SIZE, overlap=DEFAULT_OVERLAP, sampling_rate=DEFAULT_SAMPLING_RATE):
+    """
+    Extract features from EEG data using windowing with overlap.
+    
+    Args:
+        eeg_data: List of EEG records or single record
+        window_size: Size of each window in samples
+        overlap: Overlap between consecutive windows (0.0 to 1.0)
+        sampling_rate: Sampling rate of the data (Hz)
+    
+    Returns:
+        features: Array of extracted features (one row per window)
+        labels: Array of labels (one per window, same as original record label)
+    """
+    all_features = []
+    all_window_labels = []
+    
+    # Check if eeg_data is a list of records with labels or just a single record
+    if not isinstance(eeg_data, list) or (isinstance(eeg_data, tuple) and len(eeg_data) == 2 and isinstance(eeg_data[1], (int, np.integer))):
+        if isinstance(eeg_data, tuple) and len(eeg_data) == 2:
+            records = [eeg_data[0]]
+            record_labels = [eeg_data[1]]
+        else:
+            records = [eeg_data]
+            record_labels = [0]  # Default label if none provided
+    else:
+        # Assume eeg_data is a list of (record, label) tuples
+        if isinstance(eeg_data[0], tuple) and len(eeg_data[0]) == 2:
+            records = [record for record, _ in eeg_data]
+            record_labels = [label for _, label in eeg_data]
+        else:
+            records = eeg_data
+            record_labels = [0] * len(eeg_data)  # Default labels if none provided
+    
+    for record_idx, (record, label) in enumerate(zip(records, record_labels)):
+        print(f"Processing record {record_idx+1}/{len(records)}...")
+
+        # Handle different input types (DataFrame or numpy array)
+        if hasattr(record, 'columns'):  # It's a DataFrame
+            # Get time column if available, otherwise create one
+            if 'time' in record.columns or 'timestamp' in record.columns:
+                time_col = 'time' if 'time' in record.columns else 'timestamp'
+                timestamps = record[time_col].values
+            else:
+                # Create synthetic timestamps based on sampling rate
+                timestamps = np.arange(len(record)) / sampling_rate
+                
+            # Get signal columns (excluding metadata columns)
+            signal_columns = [col for col in record.columns if col not in ['time', 'label', 'timestamp']]
+            
+        else:  # It's a numpy array
+            # Create synthetic timestamps based on sampling rate
+            timestamps = np.arange(len(record)) / sampling_rate
+            
+            # For numpy arrays, assume the structure is [raw, attention, meditation]
+            # or a similar structure where all columns are signal data
+            if record.ndim == 1:
+                # Single column of data
+                record_data = pd.DataFrame({'raw': record})
+                signal_columns = ['raw']
+            else:
+                # Multiple columns of data
+                column_names = ['raw', 'attention', 'meditation']
+                # Ensure we have enough names for all columns
+                while len(column_names) < record.shape[1]:
+                    column_names.append(f'channel_{len(column_names)}')
+                # Use only as many names as we have columns
+                column_names = column_names[:record.shape[1]]
+                
+                # Create DataFrame with appropriate column names
+                record_data = pd.DataFrame(record, columns=column_names)
+                signal_columns = column_names
+        
+        # Calculate step size from overlap
+        step_size = int(window_size * (1 - overlap))
+        
+        # Create windows
+        if hasattr(record, 'columns'):  # DataFrame
+            num_samples = len(record)
+        else:  # numpy array
+            num_samples = len(record)
+            record = record_data  # Use the DataFrame we created
+        
+        num_windows = (num_samples - window_size) // step_size + 1
+        
+        print(f"Creating {num_windows} windows with size {window_size} and overlap {overlap*100}%")
+        
+        # Continue with the existing window processing logic
+        for w in range(num_windows):
+            start_idx = w * step_size
+            end_idx = start_idx + window_size
+            
+            if end_idx > num_samples:
+                break
+                
+            # Extract window
+            window_data = record.iloc[start_idx:end_idx].copy()
+            
+            # Apply preprocessing to the window
+            filtered_window = preprocess_eeg(window_data, sampling_rate)
+            
+            # Extract features from the window
+            time_features = extract_time_domain_features(filtered_window)
+            freq_features = extract_frequency_domain_features(filtered_window, sampling_rate)
+            att_med_features = extract_attention_meditation_features(filtered_window)
+            dynamic_features = extract_dynamic_features(filtered_window)
+            
+            # Combine all features
+            window_features = np.concatenate([
+                time_features,
+                freq_features,
+                att_med_features,
+                dynamic_features
+            ])
+            
+            all_features.append(window_features)
+            all_window_labels.append(label)
+            
+    return np.array(all_features), np.array(all_window_labels)
+
 def extract_features(eeg_data, sampling_rate=DEFAULT_SAMPLING_RATE):
     """
-    Extract features from EEG data.
+    Legacy function to maintain compatibility. 
+    Extracts features from EEG data without windowing.
     
     Args:
         eeg_data: List of EEG records or single record
@@ -86,9 +211,30 @@ def preprocess_eeg(eeg_record, sampling_rate=DEFAULT_SAMPLING_RATE):
         
     return filtered_data
 
-def apply_highpass_filter(signal_data, cutoff=DEFAULT_HIGHPASS_CUTOFF, fs=DEFAULT_SAMPLING_RATE):
-    """Apply high-pass filter to remove low frequency drift."""
-    b, a = signal.butter(4, cutoff/(fs/2), 'highpass')
+def apply_highpass_filter(signal_data, cutoff=1.0, fs=512.0):
+    """
+    Apply a high-pass filter to remove low frequency components.
+    
+    Args:
+        signal_data: The EEG signal data
+        cutoff: The cutoff frequency in Hz
+        fs: The sampling rate in Hz
+    
+    Returns:
+        The filtered signal
+    """
+    # Check if signal is long enough for filtfilt
+    min_length = 15  # This is the padlen value from the error
+    
+    if len(signal_data) <= min_length:
+        print(f"WARNING: Signal too short for proper filtering ({len(signal_data)} samples, need >{min_length})")
+        # Return original signal if too short
+        return signal_data
+    
+    # Original filtering code for sufficiently long signals
+    nyquist = 0.5 * fs
+    normalized_cutoff = cutoff / nyquist
+    b, a = signal.butter(2, normalized_cutoff, btype='highpass')
     return signal.filtfilt(b, a, signal_data)
 
 def apply_lowpass_filter(signal_data, cutoff=DEFAULT_LOWPASS_CUTOFF, fs=DEFAULT_SAMPLING_RATE):
