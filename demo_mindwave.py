@@ -67,6 +67,16 @@ def main():
     attention_line, = ax2.plot([], [], 'g-')
     meditation_line, = ax3.plot([], [], 'r-')
     
+    # Store running state to gracefully exit
+    is_running = True
+    
+    def on_close(event):
+        nonlocal is_running
+        is_running = False
+        logger.info("Plot window closed.")
+        
+    fig.canvas.mpl_connect('close_event', on_close)
+    
     # Set up axes
     ax1.set_title('Raw EEG Values')
     ax1.set_ylabel('Amplitude')
@@ -100,9 +110,11 @@ def main():
         # buffer items are now tuples: (window_id, window)
         for i, (window_id, window) in enumerate(buffer):
             if window_id not in processed_windows:
-                # This is a new complete window we haven't processed yet
-                window_time = current_time - (len(buffer) - i) * 0.5  # Approximate time offset (adjust as needed)
-                time_step = 0.5 / len(window) if window else 0.01  # Distribute samples within the window
+                # Calculate True Time Offset:
+                # 512 raw bytes per second vs ~1 attention byte per second
+                # Time distributed over entire duration
+                window_time = current_time - (len(buffer) - i) * 1.0  
+                time_step = 1.0 / len(window) if window else 0.01  
                 
                 for j, sample in enumerate(window):
                     sample_time = window_time + (j * time_step)
@@ -119,7 +131,7 @@ def main():
         # Process current window (in progress)
         if current_window and len(current_window) > 0:
             # Calculate time for each sample in current window
-            time_step = 0.5 / len(current_window) if current_window else 0.01
+            time_step = 1.0 / len(current_window) if current_window else 0.01
             
             for j, sample in enumerate(current_window):
                 # Place current window samples right before current time
@@ -204,9 +216,11 @@ def main():
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     
     try:
-        # Show the plot and keep it updating
-        plt.show(block=True)
-            
+        # Instead of blocking forever with plt.show(block=True),
+        # use a loop that respects the window close event
+        plt.show(block=False)
+        while is_running and plt.fignum_exists(fig.number):
+            plt.pause(0.1)
     except KeyboardInterrupt:
         logger.info("Data collection stopped by user.")
     finally:

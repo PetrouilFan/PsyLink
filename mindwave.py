@@ -15,28 +15,30 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Byte codes
-CONNECT              = b'\xc0'
-DISCONNECT           = b'\xc1'
-AUTOCONNECT          = b'\xc2'
-SYNC                 = b'\xaa'
-EXCODE               = 0x55
-POOR_SIGNAL          = 0x02
-ATTENTION            = 0x04
-MEDITATION           = 0x05
-BLINK                = 0x16
-HEADSET_CONNECTED    = b'\xd0'
-HEADSET_NOT_FOUND    = b'\xd1'
-HEADSET_DISCONNECTED = b'\xd2'
-REQUEST_DENIED       = b'\xd3'
-STANDBY_SCAN         = b'\xd4'
-RAW_VALUE            = 0x80
-ASIC_EEG_POWER       = b'\x83'
+from enum import Enum
 
-# Status codes
-STATUS_CONNECTED     = 'connected'
-STATUS_SCANNING      = 'scanning'
-STATUS_STANDBY       = 'standby'
+class ByteCode(Enum):
+    CONNECT              = b'\xc0'
+    DISCONNECT           = b'\xc1'
+    AUTOCONNECT          = b'\xc2'
+    SYNC                 = b'\xaa'
+    EXCODE               = 0x55
+    POOR_SIGNAL          = 0x02
+    ATTENTION            = 0x04
+    MEDITATION           = 0x05
+    BLINK                = 0x16
+    HEADSET_CONNECTED    = b'\xd0'
+    HEADSET_NOT_FOUND    = b'\xd1'
+    HEADSET_DISCONNECTED = b'\xd2'
+    REQUEST_DENIED       = b'\xd3'
+    STANDBY_SCAN         = b'\xd4'
+    RAW_VALUE            = 0x80
+    ASIC_EEG_POWER       = b'\x83'
+
+class Status(Enum):
+    CONNECTED     = 'connected'
+    SCANNING      = 'scanning'
+    STANDBY       = 'standby'
 
 # Use me to playback previous recorded files as if they were recorded now.
 # (using the same python class)
@@ -51,7 +53,6 @@ class OfflineHeadset:
         self.fileindex = 0
         self.f = None
         self.poor_signal = 1
-        self.count = 0
 
     def setup(self):
         pass
@@ -91,7 +92,6 @@ class OfflineHeadset:
             self.blink = data[4]
 
             self.readcounter = self.readcounter + 1
-            self.count = self.count
             return self
         else:
             self.running = False
@@ -128,7 +128,7 @@ class Headset(object):
             self.headset.running = True
 
             # Re-apply settings to ensure packet stream
-            s.write(DISCONNECT)
+            s.write(ByteCode.DISCONNECT.value)
             d = s.getSettingsDict()
             for i in range(2):
                 d['rtscts'] = not d['rtscts']
@@ -137,7 +137,7 @@ class Headset(object):
             while self.headset.running:
                 # Begin listening for packets
                 try:
-                    if s.read() == SYNC and s.read() == SYNC:
+                    if s.read() == ByteCode.SYNC.value and s.read() == ByteCode.SYNC.value:
                         # Packet found, determine plength
                         while True:
                             plength = ord(s.read())
@@ -161,8 +161,24 @@ class Headset(object):
                             logger.warning("Bad checksum: expected 0x%02x, got 0x%02x", chksum, val)
                 except (select.error, OSError):
                     break
-                except serial.SerialException:
-                    break
+                except serial.SerialTimeoutException:
+                    logger.warning("Serial timeout, waiting...")
+                    continue
+                except serial.SerialException as e:
+                    logger.error(f"Serial exception: {e}, attempting reconnect in 2 seconds...")
+                    s.close()
+                    time.sleep(2)
+                    try:
+                        self.headset.serial_open()
+                        s = self.headset.dongle
+                        s.write(ByteCode.DISCONNECT.value)
+                        d = s.getSettingsDict()
+                        for i in range(2):
+                            d['rtscts'] = not d['rtscts']
+                            s.applySettingsDict(d)
+                    except Exception as re_err:
+                        logger.error(f"Reconnect failed: {re_err}")
+                        break
 
 
             logger.info('Closing connection...')
@@ -170,89 +186,80 @@ class Headset(object):
                 s.close()
 
         def parse_payload(self, payload):
-            """Parse the payload to determine an action."""
-            while payload:
-                # Parse data row
-                excode = 0
-                try:
-                    code, payload = payload[0], payload[1:]
-                    self.headset.count = self.counter
-                    self.counter = self.counter + 1
-                    if (self.counter >= 100):
-                        self.counter = 0
-                except IndexError:
-                    pass
-                while code == EXCODE:
-                    # Count excode bytes
-                    excode += 1
-                    try:
-                        code, payload = payload[0], payload[1:]
-                    except IndexError:
-                        pass
+            """Parse the payload to extract data and fire events."""
+            while len(payload) > 0:
+                code, payload = payload[0], payload[1:]
+
+                if code == ByteCode.EXCODE.value:
+                    # Count the number of EXCODEs
+                    excode_count = 1
+                    while len(payload) > 0 and payload[0] == ByteCode.EXCODE.value:
+                        excode_count += 1
+                        payload = payload[1:]
+                    continue
+                
                 if code < 0x80:
                     # This is a single-byte code
-                    try:
-                        value, payload = payload[0], payload[1:]
-                    except IndexError:
-                        pass
-                    if code == POOR_SIGNAL:
-                        # Poor signal
+                    if len(payload) == 0:
+                        logger.warning("Payload parsing dropped: expecting single byte value but buffer is empty")
+                        break
+                    value, payload = payload[0], payload[1:]
+
+                    if code == ByteCode.POOR_SIGNAL.value:
                         old_poor_signal = self.headset.poor_signal
                         self.headset.poor_signal = value
                         if self.headset.poor_signal > 0:
                             if old_poor_signal == 0:
-                                for handler in \
-                                    self.headset.poor_signal_handlers:
-                                    handler(self.headset,
-                                            self.headset.poor_signal)
+                                for handler in self.headset.poor_signal_handlers:
+                                    handler(self.headset, self.headset.poor_signal)
                         else:
                             if old_poor_signal > 0:
-                                for handler in \
-                                    self.headset.good_signal_handlers:
-                                    handler(self.headset,
-                                            self.headset.poor_signal)
-                    elif code == ATTENTION:
-                        # Attention level
+                                for handler in self.headset.good_signal_handlers:
+                                    handler(self.headset, self.headset.poor_signal)
+                    elif code == ByteCode.ATTENTION.value:
                         self.headset.attention = value
                         for handler in self.headset.attention_handlers:
                             handler(self.headset, self.headset.attention)
-                    elif code == MEDITATION:
-                        # Meditation level
+                    elif code == ByteCode.MEDITATION.value:
                         self.headset.meditation = value
                         for handler in self.headset.meditation_handlers:
                             handler(self.headset, self.headset.meditation)
-                    elif code == BLINK:
-                        # Blink strength
+                    elif code == ByteCode.BLINK.value:
                         self.headset.blink = value
                         for handler in self.headset.blink_handlers:
                             handler(self.headset, self.headset.blink)
+                    else:
+                        logger.debug(f"Unhandled single-byte code: {hex(code)}")
                 else:
                     # This is a multi-byte code
-                    try:
-                        vlength, payload = payload[0], payload[1:]
-                    except IndexError:
-                        continue
+                    if len(payload) == 0:
+                        logger.warning("Payload parsing dropped: expecting length byte but buffer is empty")
+                        break
+                    
+                    vlength, payload = payload[0], payload[1:]
+                    
+                    if len(payload) < vlength:
+                        logger.warning("Payload parsing dropped: vlength specifies larger chunk than buffer holds")
+                        break
+                        
                     value, payload = payload[:vlength], payload[vlength:]
 
-                    # FIX: accessing value crashes elseway
-                    if code == RAW_VALUE and len(value) >= 2:
+                    if code == ByteCode.RAW_VALUE.value and len(value) >= 2:
                         raw=value[0]*256+value[1]
                         if (raw>=32768):
                             raw=raw-65536
                         self.headset.raw_value = raw
                         for handler in self.headset.raw_value_handlers:
                             handler(self.headset, self.headset.raw_value)
-                    if code == HEADSET_CONNECTED:
-                        # Headset connect success
-                        run_handlers = self.headset.status != STATUS_CONNECTED
-                        self.headset.status = STATUS_CONNECTED
+                    elif code == ByteCode.HEADSET_CONNECTED.value:
+                        run_handlers = self.headset.status != Status.CONNECTED.value
+                        self.headset.status = Status.CONNECTED.value
                         self.headset.headset_id = value.hex() if isinstance(value, bytes) else value.encode('hex')
                         if run_handlers:
                             for handler in \
                                 self.headset.headset_connected_handlers:
                                 handler(self.headset)
-                    elif code == HEADSET_NOT_FOUND:
-                        # Headset not found
+                    elif code == ByteCode.HEADSET_NOT_FOUND.value:
                         if vlength > 0:
                             not_found_id = value.hex() if isinstance(value, bytes) else value.encode('hex')
                             for handler in \
@@ -262,37 +269,37 @@ class Headset(object):
                             for handler in \
                                 self.headset.headset_notfound_handlers:
                                 handler(self.headset, None)
-                    elif code == HEADSET_DISCONNECTED:
-                        # Headset disconnected
+                    elif code == ByteCode.HEADSET_DISCONNECTED.value:
                         headset_id = value.hex() if isinstance(value, bytes) else value.encode('hex')
                         for handler in \
                             self.headset.headset_disconnected_handlers:
                             handler(self.headset, headset_id)
-                    elif code == REQUEST_DENIED:
+                    elif code == ByteCode.REQUEST_DENIED.value:
                         # Request denied
                         for handler in self.headset.request_denied_handlers:
                             handler(self.headset)
-                    elif code == STANDBY_SCAN:
+                    elif code == ByteCode.STANDBY_SCAN.value:
                         # Standby/Scan mode
+                        self.headset.status = Status.SCANNING.value
                         try:
                             byte = value[0] if isinstance(value, bytes) else ord(value[0])
                         except IndexError:
                             byte = None
                         if byte:
                             run_handlers = (self.headset.status !=
-                                            STATUS_SCANNING)
-                            self.headset.status = STATUS_SCANNING
+                                            Status.SCANNING.value)
+                            self.headset.status = Status.SCANNING.value
                             if run_handlers:
                                 for handler in self.headset.scanning_handlers:
                                     handler(self.headset)
                         else:
                             run_handlers = (self.headset.status !=
-                                            STATUS_STANDBY)
-                            self.headset.status = STATUS_STANDBY
+                                            Status.STANDBY.value)
+                            self.headset.status = Status.STANDBY.value
                             if run_handlers:
                                 for handler in self.headset.standby_handlers:
                                     handler(self.headset)
-                    elif code == ASIC_EEG_POWER:
+                    elif code == ByteCode.ASIC_EEG_POWER.value:
                         j = 0
                         for i in ['delta', 'theta', 'low-alpha', 'high-alpha', 'low-beta', 'high-beta', 'low-gamma', 'mid-gamma']:
                             v0 = value[j] if isinstance(value, bytes) else ord(value[j])
@@ -306,7 +313,7 @@ class Headset(object):
                             handler(self.headset, self.headset.waves)
 
     def __init__(self, device, headset_id=None, open_serial=True):
-        """Initialize the  headset."""
+        """Initialize the headset."""
         # Initialize headset values
         self.dongle = None
         self.listener = None
@@ -352,11 +359,11 @@ class Headset(object):
                 return
         
         id_bytes = bytes.fromhex(headset_id) if hasattr(bytes, 'fromhex') else headset_id.decode('hex')
-        self.dongle.write(CONNECT + id_bytes)
+        self.dongle.write(ByteCode.CONNECT.value + id_bytes)
 
     def autoconnect(self):
         """Automatically connect device to headset."""
-        self.dongle.write(AUTOCONNECT)
+        self.dongle.write(ByteCode.AUTOCONNECT.value)
 
     def disconnect(self):
         """Disconnect the device from the headset."""
@@ -366,7 +373,7 @@ class Headset(object):
         """Open the serial connection and begin listening for data."""
         # Establish serial connection to the dongle
         if not self.dongle or not self.dongle.isOpen():
-            self.dongle = serial.Serial(self.device, 115200)
+            self.dongle = serial.Serial(self.device, 115200, timeout=1.0)
 
         # Begin listening to the serial device
         if not self.listener or not self.listener.isAlive():

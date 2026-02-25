@@ -36,6 +36,10 @@ class MindwaveRecorder:
         self.csv_file = None
         self.start_time = None
         
+        # TKinter Root (Created once)
+        self.tk_root = tk.Tk()
+        self.tk_root.withdraw()
+        
         # Initialize the connection
         self.connection = MindwaveConnection(self.device_path)
         
@@ -100,21 +104,18 @@ class MindwaveRecorder:
     
     def select_file(self):
         """Open a dialog to select where to save the recording"""
-        root = tk.Tk()
-        root.withdraw()  # Hide the main window
-        
         # Get current date/time for default filename
         now = datetime.now()
         default_filename = f"mindwave_recording_{now.strftime('%Y%m%d_%H%M%S')}.csv"
         
         # Open file dialog
         file_path = filedialog.asksaveasfilename(
+            parent=self.tk_root,
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
             initialfile=default_filename
         )
         
-        root.destroy()
         return file_path
     
     def start_recording(self, event):
@@ -174,9 +175,11 @@ class MindwaveRecorder:
         # Process any new complete windows from the buffer
         for i, (window_id, window) in enumerate(buffer):
             if window_id not in self.processed_windows:
-                # This is a new complete window we haven't processed yet
-                window_time = current_time - (len(buffer) - i) * 0.5  # Approximate time offset
-                time_step = 0.5 / len(window) if window else 0.01  # Distribute samples within the window
+                # Calculate True Time Offset:
+                # 512 raw bytes per second vs ~1 attention byte per second
+                # Time distributed over entire duration
+                window_time = current_time - (len(buffer) - i) * 1.0  
+                time_step = 1.0 / len(window) if window else 0.01  
                 
                 for j, sample in enumerate(window):
                     sample_time = window_time + (j * time_step)
@@ -199,7 +202,7 @@ class MindwaveRecorder:
         # Process current window (in progress)
         if current_window and len(current_window) > 0:
             # Calculate time for each sample in current window
-            time_step = 0.5 / len(current_window) if current_window else 0.01
+            time_step = 1.0 / len(current_window) if current_window else 0.01
             
             for j, sample in enumerate(current_window):
                 # Place current window samples right before current time
@@ -302,6 +305,11 @@ class MindwaveRecorder:
             if self.csv_file:
                 self.csv_file.close()
         
+        try:
+            self.tk_root.destroy()
+        except:
+            pass
+            
         self.connection.stop()
         logger.info("Disconnected from headset.")
 

@@ -18,25 +18,23 @@ import joblib
 
 # Import the feature extraction module
 from feature_extraction import extract_features_with_windows
+from config import CONFIG
 
-# Dataset constants
-DATASET_PATH = "datasets/arm"
-CLASSES = ['up', 'down', 'left', 'right']
+# Global variables
+CLASSES = ['up', 'down', 'left', 'right'] # Enforced to prevent permutation
 
-# Training parameters
-LEARNING_RATE = 0.003
-BATCH_SIZE = 32
+# Hyperparameters loaded from settings JSON
+WINDOW_SIZE = CONFIG["features"]["window_size"]
+WINDOW_OVERLAP = CONFIG["features"]["window_overlap"]
+BATCH_SIZE = CONFIG["model"]["batch_size"]
+LEARNING_RATE = CONFIG["model"]["learning_rate"]
 NUM_EPOCHS = 100
-TEST_SIZE = 0.2
-RANDOM_SEED = 42
+TEST_SIZE = CONFIG["model"]["test_size"]
+RANDOM_SEED = CONFIG["model"]["random_seed"]
 
-# Model parameters
-HIDDEN_SIZES = [128, 64, 32]
-DROPOUT_RATE = 0.2
-
-# Window parameters
-WINDOW_SIZE = 100  # 1 second at 250Hz sampling rate
-WINDOW_OVERLAP = 0.90  # 90% overlap
+# Model architecture from config
+HIDDEN_SIZES = CONFIG["model"]["hidden_sizes"]
+DROPOUT_RATE = CONFIG["model"]["dropout_rate"]
 
 class EEGDataset(Dataset):
     def __init__(self, features, labels):
@@ -114,6 +112,7 @@ def load_dataset(base_path, class_names=None):
     if class_names is None:
         # Get all subdirectories as class names
         class_names = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
+        class_names.sort() # Extremely critical to prevent model output permutation across operating systems
     
     data_with_labels = []
     
@@ -148,15 +147,19 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         train_losses: List of training losses
         val_losses: List of validation losses
         train_accs: List of training accuracies
-        val_accs: List of validation accuracies
+        val_accuracies: List of validation accuracies
     """
     train_losses = []
     val_losses = []
     train_accs = []
-    val_accs = []
+    val_accuracies = []
     
-    best_val_acc = 0.0
+    best_val_loss = float('inf')
     best_model_state = None
+    patience = CONFIG["model"]["patience"]
+    epochs_no_improve = 0
+    
+    print("\nStarting training...")
     
     # Move model to device
     model = model.to(device)
@@ -193,10 +196,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             total += targets.size(0)
             correct += (predicted == target_classes).sum().item()
         
-        epoch_loss = running_loss / len(train_loader.dataset)
-        epoch_acc = correct / total
-        train_losses.append(epoch_loss)
-        train_accs.append(epoch_acc)
+        train_loss = running_loss / len(train_loader.dataset)
+        train_acc = correct / total
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
         
         # Validation
         model.eval()
@@ -225,26 +228,33 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_loss = val_loss / len(val_loader.dataset)
         val_accuracy = correct / total
         val_losses.append(val_loss)
-        val_accs.append(val_accuracy)
+        val_accuracies.append(val_accuracy)
         
-        print(f"Epoch {epoch+1}/{num_epochs}, "
-              f"Train Loss: {epoch_loss:.4f}, "
-              f"Train Accuracy: {epoch_acc:.4f}, "
-              f"Val Loss: {val_loss:.4f}, "
-              f"Val Accuracy: {val_accuracy:.4f}")
-        
-        # Save best model
-        if val_accuracy > best_val_acc:
-            best_val_acc = val_accuracy
+        # Early Stopping logic
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             best_model_state = model.state_dict().copy()
-            print(f"✓ New best model saved (validation accuracy: {val_accuracy:.4f})")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            
+        if (epoch+1) % 10 == 0:
+            print(f"Epoch {epoch+1}/{num_epochs}, "
+                  f"Train Loss: {train_loss:.4f}, "
+                  f"Train Accuracy: {train_acc:.4f}, "
+                  f"Val Loss: {val_loss:.4f}, "
+                  f"Val Accuracy: {val_accuracy:.4f}")
+                  
+        if epochs_no_improve >= patience:
+            print(f"Early stopping triggered at epoch {epoch+1}")
+            break
     
-    # Restore best model
+    # Load the best model weights back
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-        print(f"Restored best model with validation accuracy: {best_val_acc:.4f}")
-    
-    return model, train_losses, val_losses, train_accs, val_accs
+        print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+        
+    return model, train_losses, val_losses, train_accs, val_accuracies
 
 def evaluate_model(model, test_loader, device='cuda'):
     """
@@ -325,7 +335,15 @@ def plot_confusion_matrix(cm, class_names):
 
 def main():
     parser = argparse.ArgumentParser(description="Train MLP Model with Custom Dataset Path")
-    parser.add_argument("--dataset", type=str, default=DATASET_PATH, help="Path to training dataset folder")
+    parser.add_argument("--dataset", type=str, default="datasets/arm", help="Path to training dataset folder")
+    parser.add_argument("--lr", type=float, default=LEARNING_RATE, help="Learning rate for optimizer")
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE, help="Batch size for training")
+    parser.add_argument("--epochs", type=int, default=NUM_EPOCHS, help="Number of training epochs")
+    parser.add_argument("--window_size", type=int, default=WINDOW_SIZE, help="Window size for feature extraction")
+    parser.add_argument("--window_overlap", type=float, default=WINDOW_OVERLAP, help="Window overlap for feature extraction")
+    parser.add_argument("--test_size", type=float, default=TEST_SIZE, help="Proportion of the dataset to include in the test split")
+    parser.add_argument("--dropout_rate", type=float, default=DROPOUT_RATE, help="Dropout rate for MLP layers")
+    parser.add_argument("--hidden_sizes", type=int, nargs='+', default=HIDDEN_SIZES, help="List of hidden layer sizes")
     args = parser.parse_args()
     
     # Set device
@@ -346,11 +364,11 @@ def main():
     print(f"Data loaded: {len(data_with_labels)} records")
     
     # Extract features with windowing
-    print(f"Extracting features using windows (size={WINDOW_SIZE}, overlap={WINDOW_OVERLAP*100}%)...")
+    print(f"Extracting features using windows (size={args.window_size}, overlap={args.window_overlap*100}%)...")
     features, labels = extract_features_with_windows(
         data_with_labels, 
-        window_size=WINDOW_SIZE, 
-        overlap=WINDOW_OVERLAP
+        window_size=args.window_size, 
+        overlap=args.window_overlap
     )
     
     print(f"Extracted features from {len(features)} windows")
@@ -366,7 +384,7 @@ def main():
     # Split data into train, validation, and test sets
     try:
         X_train, X_temp, y_train, y_temp = train_test_split(
-            features, labels_one_hot, test_size=TEST_SIZE * 1.5, random_state=RANDOM_SEED,
+            features, labels_one_hot, test_size=args.test_size * 1.5, random_state=RANDOM_SEED,
             stratify=labels  # Ensure balanced classes
         )
         
@@ -378,7 +396,7 @@ def main():
     except ValueError as e:
         print(f"Warning: Stratification failed ({e}). Falling back to unstratified split.")
         X_train, X_temp, y_train, y_temp = train_test_split(
-            features, labels_one_hot, test_size=TEST_SIZE * 1.5, random_state=RANDOM_SEED
+            features, labels_one_hot, test_size=args.test_size * 1.5, random_state=RANDOM_SEED
         )
         X_val, X_test, y_val, y_test = train_test_split(
             X_temp, y_temp, test_size=0.33, random_state=RANDOM_SEED
@@ -388,15 +406,19 @@ def main():
     print(f"Validation set: {len(X_val)} windows")
     print(f"Test set: {len(X_test)} windows")
     
+    # Check if a validation split broke stratify limits
+    if len(np.unique(np.argmax(y_val, axis=1))) < len(CLASSES):
+        print("Warning: Validation set is missing some classes. You need more data.")
+    
     # Standardize features
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
+    X_train_scaled = scaler.fit_transform(X_train)
     X_val = scaler.transform(X_val)
     X_test = scaler.transform(X_test)
     
     # Create data loaders
     train_dataset = EEGDataset(
-        torch.FloatTensor(X_train),
+        torch.FloatTensor(X_train_scaled),
         torch.FloatTensor(y_train)
     )
     

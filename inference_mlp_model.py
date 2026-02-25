@@ -9,6 +9,7 @@ from mindwave_connection import MindwaveConnection
 from feature_extraction import extract_features_with_windows, DEFAULT_LOWPASS_CUTOFF
 from filters import smooth_signal
 from eeg_buffer import EEGBuffer
+from config import CONFIG
 import os
 import pandas as pd
 import traceback
@@ -20,14 +21,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Model constants - must match training parameters
-HIDDEN_SIZES = [128, 64, 32]
-DROPOUT_RATE = 0.2
-CLASSES = ['up', 'down', 'left', 'right']
+# Model constants - loaded from config
+HIDDEN_SIZES = CONFIG["model"]["hidden_sizes"]
+DROPOUT_RATE = CONFIG["model"]["dropout_rate"]
+CLASSES = ['up', 'down', 'left', 'right'] # Kept static for inference reference
 NUM_CLASSES = len(CLASSES)
 
 # Window parameters
-WINDOW_SIZE = 100  # Reduced from 100 to 50 samples for faster inference
+WINDOW_SIZE = CONFIG["features"]["window_size"]
 PREVIEW_SECONDS = 5
 MAX_HISTORY_SECONDS = PREVIEW_SECONDS + 2
 BUFFERSIZE = 100
@@ -69,14 +70,19 @@ class MLPModel(nn.Module):
         
         return x
 
-def load_model_and_scaler(model_dir="models"):
+def load_model_and_scaler(model_dir):
     """Load the trained model and scaler parameters"""
-    model_path = os.path.join(model_dir, "mlp_model.pth")
-    scaler_path = os.path.join(model_dir, "scaler.joblib")
+    # Enforce relative directory resolution to prevent "FileNotFoundError" when CLI runner operates outside project root
+    base_dir = model_dir
+    if not os.path.isabs(model_dir):
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), model_dir)
+        
+    model_path = os.path.join(base_dir, "mlp_model.pth")
+    scaler_path = os.path.join(base_dir, "scaler.joblib")
     
     # Check if files exist
     if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-        raise FileNotFoundError(f"Model or scaler file not found in {model_dir}. Make sure to train the model first.")
+        raise FileNotFoundError(f"Model or scaler file not found in {base_dir}. Make sure to train the model first.")
     
     # Load scaler
     scaler = joblib.load(scaler_path)
@@ -287,13 +293,12 @@ def main():
                 if len(all_values) < WINDOW_SIZE:
                     pass
                 else:
+                    # Create the same expected array directly
                     buffer_data = np.array(all_values)
-                    df_data = pd.DataFrame(buffer_data, columns=['raw', 'attention', 'meditation'])
-                    mock_data_with_labels = [(df_data, 0)]
                     
                     with np.errstate(divide='ignore', invalid='ignore'):
                         features, _ = extract_features_with_windows(
-                            mock_data_with_labels,
+                            buffer_data,
                             window_size=WINDOW_SIZE,
                             overlap=0,
                             sampling_rate=SAMPLING_RATE

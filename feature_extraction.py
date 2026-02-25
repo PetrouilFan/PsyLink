@@ -4,16 +4,16 @@ from scipy import signal
 import matplotlib.pyplot as plt
 
 # Default signal processing parameters
-DEFAULT_SAMPLING_RATE = 250
+DEFAULT_SAMPLING_RATE = 250  # Hz
 DEFAULT_HIGHPASS_CUTOFF = 1.0
 DEFAULT_LOWPASS_CUTOFF = 50.0
 DEFAULT_NOTCH_FREQ = 50.0  # For power line interference
 
 # Default window parameters
-DEFAULT_WINDOW_SIZE = 250  # 1 second at 250Hz sampling rate
-DEFAULT_OVERLAP = 0.5      # 50% overlap
+DEFAULT_WINDOW_SIZE = 100  # Sync with training constants
+DEFAULT_WINDOW_OVERLAP = 0.50      # 50% overlap
 
-def extract_features_with_windows(eeg_data, window_size=DEFAULT_WINDOW_SIZE, overlap=DEFAULT_OVERLAP, sampling_rate=DEFAULT_SAMPLING_RATE):
+def extract_features_with_windows(eeg_data, window_size=DEFAULT_WINDOW_SIZE, overlap=DEFAULT_WINDOW_OVERLAP, sampling_rate=DEFAULT_SAMPLING_RATE):
     """
     Extract features from EEG data using windowing with overlap.
     

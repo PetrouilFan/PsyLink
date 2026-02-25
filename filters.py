@@ -107,13 +107,13 @@ def normalize_signal(data, method='minmax'):
         normalized_data = (data - mean) / std
         
     elif method == 'robust':
-        # Robust scaling based on percentiles
-        p25 = np.percentile(data, 25)
-        p75 = np.percentile(data, 75)
-        iqr = p75 - p25
+        # Use median and Interquartile Range (IQR) for robustness against outliers
+        median = np.median(data)
+        q75, q25 = np.percentile(data, [75, 25])
+        iqr = q75 - q25
         if iqr == 0:
-            return np.zeros_like(data)
-        normalized_data = (data - p25) / iqr
+            return data - median
+        return (data - median) / iqr
         
     else:
         raise ValueError(f"Unknown normalization method: {method}")
