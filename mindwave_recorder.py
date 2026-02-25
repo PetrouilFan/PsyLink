@@ -7,15 +7,20 @@ import tkinter as tk
 from tkinter import filedialog
 import csv
 import os
+import argparse
+import logging
 from datetime import datetime
 from mindwave_connection import MindwaveConnection
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 PREVIEW_SECONDS = 5
+MAX_HISTORY_SECONDS = PREVIEW_SECONDS + 2
 
 class MindwaveRecorder:
-    def __init__(self):
-        # Replace with your actual device path
-        self.device_path = "COM4"  # Windows default
+    def __init__(self, device_path):
+        self.device_path = device_path
         
         # Data storage
         self.all_raw_data = []
@@ -84,11 +89,11 @@ class MindwaveRecorder:
     
     def connect(self):
         """Connect to the Mindwave headset"""
-        print("Connecting to Mindwave headset...")
+        logger.info("Connecting to Mindwave headset...")
         if not self.connection.connect():
-            print("Failed to connect to headset. Please check the device path and try again.")
+            logger.error("Failed to connect to headset. Please check the device path and try again.")
             return False
-        print("Connected to headset.")
+        logger.info("Connected to headset.")
         self.connection.start()
         self.start_time = time.time()
         return True
@@ -115,13 +120,13 @@ class MindwaveRecorder:
     def start_recording(self, event):
         """Start recording data to a CSV file"""
         if self.recording:
-            print("Already recording!")
+            logger.info("Already recording!")
             return
         
         # Select file to save recording
         file_path = self.select_file()
         if not file_path:
-            print("Recording cancelled")
+            logger.info("Recording cancelled")
             return
         
         self.recording_file = file_path
@@ -134,7 +139,7 @@ class MindwaveRecorder:
         # Write header
         self.csv_writer.writerow(['timestamp', 'raw', 'attention', 'meditation'])
         
-        print(f"Recording started. Saving to {self.recording_file}")
+        logger.info(f"Recording started. Saving to {self.recording_file}")
         
         # Add recording indicator to the plot title
         self.fig.suptitle(f'Mindwave Recorder - RECORDING to {os.path.basename(self.recording_file)}')
@@ -142,7 +147,7 @@ class MindwaveRecorder:
     def stop_recording(self, event):
         """Stop recording data"""
         if not self.recording:
-            print("Not currently recording!")
+            logger.info("Not currently recording!")
             return
         
         self.recording = False
@@ -153,7 +158,7 @@ class MindwaveRecorder:
             self.csv_file = None
             self.csv_writer = None
         
-        print(f"Recording stopped. Data saved to {self.recording_file}")
+        logger.info(f"Recording stopped. Data saved to {self.recording_file}")
         
         # Update the plot title
         self.fig.suptitle('Mindwave Recorder - NOT RECORDING')
@@ -167,8 +172,8 @@ class MindwaveRecorder:
         current_window = self.connection.get_current_window()
         
         # Process any new complete windows from the buffer
-        for i, window in enumerate(buffer):
-            if i not in self.processed_windows:
+        for i, (window_id, window) in enumerate(buffer):
+            if window_id not in self.processed_windows:
                 # This is a new complete window we haven't processed yet
                 window_time = current_time - (len(buffer) - i) * 0.5  # Approximate time offset
                 time_step = 0.5 / len(window) if window else 0.01  # Distribute samples within the window
@@ -186,7 +191,10 @@ class MindwaveRecorder:
                     self.all_attention_data.append(attention_value)
                     self.all_meditation_data.append(meditation_value)
                 
-                self.processed_windows.add(i)
+                self.processed_windows.add(window_id)
+                # Keep set small
+                if len(self.processed_windows) > 100:
+                    self.processed_windows.remove(min(self.processed_windows))
         
         # Process current window (in progress)
         if current_window and len(current_window) > 0:
@@ -212,23 +220,37 @@ class MindwaveRecorder:
         # Sort data by time to ensure correct plotting order
         if self.time_points:
             sorted_indices = np.argsort(self.time_points)
-            time_points_sorted = [self.time_points[i] for i in sorted_indices]
-            raw_data_sorted = [self.all_raw_data[i] for i in sorted_indices]
-            attention_data_sorted = [self.all_attention_data[i] for i in sorted_indices]
-            meditation_data_sorted = [self.all_meditation_data[i] for i in sorted_indices]
+            self.time_points[:] = [self.time_points[i] for i in sorted_indices]
+            self.all_raw_data[:] = [self.all_raw_data[i] for i in sorted_indices]
+            self.all_attention_data[:] = [self.all_attention_data[i] for i in sorted_indices]
+            self.all_meditation_data[:] = [self.all_meditation_data[i] for i in sorted_indices]
             
-            # Limit data to last PREVIEW_SECONDS seconds
+            # Prevent memory leak by truncating lists
+            truncate_time = current_time - MAX_HISTORY_SECONDS
+            trunc_index = 0
+            for i, t in enumerate(self.time_points):
+                if t >= truncate_time:
+                    trunc_index = i
+                    break
+                    
+            if trunc_index > 0:
+                self.time_points[:] = self.time_points[trunc_index:]
+                self.all_raw_data[:] = self.all_raw_data[trunc_index:]
+                self.all_attention_data[:] = self.all_attention_data[trunc_index:]
+                self.all_meditation_data[:] = self.all_meditation_data[trunc_index:]
+
+            # Limit data to last PREVIEW_SECONDS seconds for plotting
             cutoff_time = current_time - PREVIEW_SECONDS
             cutoff_index = 0
-            for i, t in enumerate(time_points_sorted):
+            for i, t in enumerate(self.time_points):
                 if t >= cutoff_time:
                     cutoff_index = i
                     break
             
-            display_times = time_points_sorted[cutoff_index:]
-            display_raw = raw_data_sorted[cutoff_index:]
-            display_attention = attention_data_sorted[cutoff_index:]
-            display_meditation = meditation_data_sorted[cutoff_index:]
+            display_times = self.time_points[cutoff_index:]
+            display_raw = self.all_raw_data[cutoff_index:]
+            display_attention = self.all_attention_data[cutoff_index:]
+            display_meditation = self.all_meditation_data[cutoff_index:]
             
             # Update plot data
             self.raw_line.set_data(display_times, display_raw)
@@ -269,7 +291,7 @@ class MindwaveRecorder:
         try:
             plt.show()
         except KeyboardInterrupt:
-            print("Recorder stopped by user.")
+            logger.info("Recorder stopped by user.")
         finally:
             self.cleanup()
     
@@ -281,10 +303,14 @@ class MindwaveRecorder:
                 self.csv_file.close()
         
         self.connection.stop()
-        print("Disconnected from headset.")
+        logger.info("Disconnected from headset.")
 
 def main():
-    recorder = MindwaveRecorder()
+    parser = argparse.ArgumentParser(description='Mindwave Recorder')
+    parser.add_argument('--port', type=str, default='COM4', help='Serial port for Mindwave headset')
+    args = parser.parse_args()
+
+    recorder = MindwaveRecorder(device_path=args.port)
     recorder.run()
 
 if __name__ == "__main__":

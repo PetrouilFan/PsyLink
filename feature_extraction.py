@@ -239,11 +239,21 @@ def apply_highpass_filter(signal_data, cutoff=1.0, fs=512.0):
 
 def apply_lowpass_filter(signal_data, cutoff=DEFAULT_LOWPASS_CUTOFF, fs=DEFAULT_SAMPLING_RATE):
     """Apply low-pass filter to remove high frequency noise."""
+    min_length = 15
+    if len(signal_data) <= min_length:
+        return signal_data
+    if cutoff >= fs/2:
+        cutoff = (fs/2) - 1
     b, a = signal.butter(4, cutoff/(fs/2), 'lowpass')
     return signal.filtfilt(b, a, signal_data)
 
 def apply_notch_filter(signal_data, notch_freq=DEFAULT_NOTCH_FREQ, fs=DEFAULT_SAMPLING_RATE):
     """Apply notch filter to remove power line interference."""
+    min_length = 15
+    if len(signal_data) <= min_length:
+        return signal_data
+    if notch_freq >= fs/2:
+        return signal_data
     q = 30.0  # Quality factor
     b, a = signal.iirnotch(notch_freq, q, fs)
     return signal.filtfilt(b, a, signal_data)
@@ -342,8 +352,12 @@ def extract_frequency_domain_features(filtered_data, sampling_rate=DEFAULT_SAMPL
     for col in signal_columns:
         signal_data = filtered_data[col].values
         
-        # Calculate PSD using Welch's method
-        f, psd = signal.welch(signal_data, sampling_rate, nperseg=min(256, len(signal_data)))
+        # Calculate PSD using Welch's method safely
+        nperseg = min(256, len(signal_data))
+        if nperseg < 16:
+            f, psd = np.array([0]), np.array([0])
+        else:
+            f, psd = signal.welch(signal_data, sampling_rate, nperseg=nperseg)
         
         # Extract band powers
         band_powers = {}

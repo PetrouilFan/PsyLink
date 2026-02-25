@@ -6,13 +6,14 @@ This driver implements the serial protocol that is being used in the Mindwave Mo
  OfflineHeadset: this class can be used in the same as Headset to replay a previous stored file.
 
 '''
-from __future__ import print_function
-
 import select, serial, threading
 from pprint import pprint
 import time
 import datetime
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Byte codes
 CONNECT              = b'\xc0'
@@ -57,7 +58,7 @@ class OfflineHeadset:
 
     def setupfile(self):
         self.datasetfile = self.basefilename
-        print(self.datasetfile)
+        logger.info(f"Opening dataset file: {self.datasetfile}")
         if os.path.isfile(self.datasetfile):
             if self.f:
                 self.f.close()
@@ -154,16 +155,17 @@ class Headset(object):
                         val = ~val & 0xff
                         chksum = ord(s.read())
 
-                        #if val == chksum:
-                        if True: # ignore bad checksums
+                        if val == chksum:
                             self.parse_payload(payload)
+                        else:
+                            logger.warning("Bad checksum: expected 0x%02x, got 0x%02x", chksum, val)
                 except (select.error, OSError):
                     break
                 except serial.SerialException:
                     break
 
 
-            print('Closing connection...')
+            logger.info('Closing connection...')
             if s and s.isOpen():
                 s.close()
 
@@ -244,7 +246,7 @@ class Headset(object):
                         # Headset connect success
                         run_handlers = self.headset.status != STATUS_CONNECTED
                         self.headset.status = STATUS_CONNECTED
-                        self.headset.headset_id = value.encode('hex')
+                        self.headset.headset_id = value.hex() if isinstance(value, bytes) else value.encode('hex')
                         if run_handlers:
                             for handler in \
                                 self.headset.headset_connected_handlers:
@@ -252,7 +254,7 @@ class Headset(object):
                     elif code == HEADSET_NOT_FOUND:
                         # Headset not found
                         if vlength > 0:
-                            not_found_id = value.encode('hex')
+                            not_found_id = value.hex() if isinstance(value, bytes) else value.encode('hex')
                             for handler in \
                                 self.headset.headset_notfound_handlers:
                                 handler(self.headset, not_found_id)
@@ -262,7 +264,7 @@ class Headset(object):
                                 handler(self.headset, None)
                     elif code == HEADSET_DISCONNECTED:
                         # Headset disconnected
-                        headset_id = value.encode('hex')
+                        headset_id = value.hex() if isinstance(value, bytes) else value.encode('hex')
                         for handler in \
                             self.headset.headset_disconnected_handlers:
                             handler(self.headset, headset_id)
@@ -273,7 +275,7 @@ class Headset(object):
                     elif code == STANDBY_SCAN:
                         # Standby/Scan mode
                         try:
-                            byte = ord(value[0])
+                            byte = value[0] if isinstance(value, bytes) else ord(value[0])
                         except IndexError:
                             byte = None
                         if byte:
@@ -293,7 +295,12 @@ class Headset(object):
                     elif code == ASIC_EEG_POWER:
                         j = 0
                         for i in ['delta', 'theta', 'low-alpha', 'high-alpha', 'low-beta', 'high-beta', 'low-gamma', 'mid-gamma']:
-                            self.headset.waves[i] = ord(value[j])*255*255+ord(value[j+1])*255+ord(value[j+2])
+                            v0 = value[j] if isinstance(value, bytes) else ord(value[j])
+                            v1 = value[j+1] if isinstance(value, bytes) else ord(value[j+1])
+                            v2 = value[j+2] if isinstance(value, bytes) else ord(value[j+2])
+                            
+                            # Fixed math base: 256 for bytes instead of 255
+                            self.headset.waves[i] = (v0 << 16) | (v1 << 8) | v2
                             j += 3
                         for handler in self.headset.waves_handlers:
                             handler(self.headset, self.headset.waves)
@@ -343,7 +350,9 @@ class Headset(object):
             if not headset_id:
                 self.autoconnect()
                 return
-        self.dongle.write(''.join([CONNECT, headset_id.decode('hex')]))
+        
+        id_bytes = bytes.fromhex(headset_id) if hasattr(bytes, 'fromhex') else headset_id.decode('hex')
+        self.dongle.write(CONNECT + id_bytes)
 
     def autoconnect(self):
         """Automatically connect device to headset."""

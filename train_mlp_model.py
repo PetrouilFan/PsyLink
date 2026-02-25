@@ -13,6 +13,8 @@ from tqdm import tqdm
 import glob
 import time
 import sys
+import argparse
+import joblib
 
 # Import the feature extraction module
 from feature_extraction import extract_features_with_windows
@@ -322,6 +324,10 @@ def plot_confusion_matrix(cm, class_names):
     return plt
 
 def main():
+    parser = argparse.ArgumentParser(description="Train MLP Model with Custom Dataset Path")
+    parser.add_argument("--dataset", type=str, default=DATASET_PATH, help="Path to training dataset folder")
+    args = parser.parse_args()
+    
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -331,8 +337,12 @@ def main():
     np.random.seed(RANDOM_SEED)
     
     # Load dataset
-    print("Loading dataset...")
-    data_with_labels = load_dataset(DATASET_PATH, class_names=CLASSES)
+    print(f"Loading dataset from: {args.dataset}...")
+    data_with_labels = load_dataset(args.dataset, class_names=CLASSES)
+    if not data_with_labels:
+        print(f"Error: Dataset {args.dataset} not found or empty!")
+        return
+        
     print(f"Data loaded: {len(data_with_labels)} records")
     
     # Extract features with windowing
@@ -354,16 +364,25 @@ def main():
         labels_one_hot[i, label] = 1
     
     # Split data into train, validation, and test sets
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        features, labels_one_hot, test_size=TEST_SIZE * 1.5, random_state=RANDOM_SEED,
-        stratify=labels  # Ensure balanced classes
-    )
-    
-    # Further split temp data into validation and test
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.33, random_state=RANDOM_SEED,
-        stratify=np.argmax(y_temp, axis=1)  # Ensure balanced classes
-    )
+    try:
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            features, labels_one_hot, test_size=TEST_SIZE * 1.5, random_state=RANDOM_SEED,
+            stratify=labels  # Ensure balanced classes
+        )
+        
+        # Further split temp data into validation and test
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.33, random_state=RANDOM_SEED,
+            stratify=np.argmax(y_temp, axis=1)  # Ensure balanced classes
+        )
+    except ValueError as e:
+        print(f"Warning: Stratification failed ({e}). Falling back to unstratified split.")
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            features, labels_one_hot, test_size=TEST_SIZE * 1.5, random_state=RANDOM_SEED
+        )
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.33, random_state=RANDOM_SEED
+        )
     
     print(f"Training set: {len(X_train)} windows")
     print(f"Validation set: {len(X_val)} windows")
@@ -427,12 +446,10 @@ def main():
     model_dir = "models"
     os.makedirs(model_dir, exist_ok=True)
     torch.save(trained_model.state_dict(), os.path.join(model_dir, "mlp_model.pth"))
-    np.save(os.path.join(model_dir, "scaler_params.npy"), {
-        'mean': scaler.mean_,
-        'scale': scaler.scale_
-    })
+    
+    joblib.dump(scaler, os.path.join(model_dir, "scaler.joblib"))
     print(f"Model saved to {os.path.join(model_dir, 'mlp_model.pth')}")
-    print(f"Scaler parameters saved to {os.path.join(model_dir, 'scaler_params.npy')}")
+    print(f"Scaler parameters saved to {os.path.join(model_dir, 'scaler.joblib')}")
     
     # Plot training and validation metrics
     plt.figure(figsize=(12, 10))

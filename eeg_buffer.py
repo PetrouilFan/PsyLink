@@ -1,6 +1,7 @@
 import mindwave
 import time
 import numpy as np
+import threading
 
 class EEGBuffer:
     '''
@@ -16,50 +17,48 @@ class EEGBuffer:
         self.last_value = 0
         self.last_attention = 0
         self.last_meditation = 0
+        self.window_counter = 0
+        self.lock = threading.Lock()
     
     def is_ready(self):
-        '''
-        Check if the buffer is ready to be used
-        '''
-        return len(self.buffer) >= self.size
+        with self.lock:
+            return len(self.buffer) >= self.size
     
     def get_current_values(self):
-        '''
-        Get the current values of raw, attention, and meditation
-        '''
-        return self.last_value, self.last_attention, self.last_meditation
+        with self.lock:
+            return self.last_value, self.last_attention, self.last_meditation
     
     def get_all_values(self):
-        '''
-        Get all the values in the buffer and current window for feature extraction
-        '''
-        all_values = []
-        for window in self.buffer:
-            all_values.extend(window)
-        all_values.extend(self.current_window)
-        return all_values
+        with self.lock:
+            return [item for _, window in self.buffer for item in window] + self.current_window
+            
+    def get_buffer_copy(self):
+        with self.lock:
+            # return shallow copy to prevent iteration crashes in other threads
+            return list(self.buffer)
+            
+    def get_current_window_copy(self):
+        with self.lock:
+            return list(self.current_window)
     
-
     def on_value_callback(self, raw=None, attention=None, meditation=None):
-        '''
-        Add the raw, attention, and meditation values to the current window
-        '''
-        if raw is not None:
-            self.last_value = raw
-        if attention is not None:
-            self.change_window()
-            self.last_attention = attention
-        if meditation is not None:
-            self.last_meditation = meditation
-        self.current_window.append([self.last_value, self.last_attention, self.last_meditation])
+        with self.lock:
+            if raw is not None:
+                self.last_value = raw
+            if attention is not None:
+                self._change_window_internal()
+                self.last_attention = attention
+            if meditation is not None:
+                self.last_meditation = meditation
+            self.current_window.append([self.last_value, self.last_attention, self.last_meditation])
 
     def change_window(self):
-        '''
-        Change the current window and add it to the buffer
-        '''
-        self.buffer.append(self.current_window)
+        with self.lock:
+            self._change_window_internal()
+            
+    def _change_window_internal(self):
+        self.buffer.append((self.window_counter, self.current_window))
+        self.window_counter += 1
         self.current_window = []
         if len(self.buffer) > self.size:
             self.buffer.pop(0)
-
-

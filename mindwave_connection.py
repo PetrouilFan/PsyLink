@@ -1,7 +1,10 @@
 import time
 import threading
 import mindwave
+import logging
 from eeg_buffer import EEGBuffer
+
+logger = logging.getLogger(__name__)
 
 class MindwaveConnection:
     """
@@ -30,10 +33,10 @@ class MindwaveConnection:
             self.headset.attention_handlers.append(self._handle_attention)
             self.headset.meditation_handlers.append(self._handle_meditation)
             
-            print(f"Connected to Mindwave headset at {self.device_path}")
+            logger.info(f"Connected to Mindwave headset at {self.device_path}")
             return True
         except Exception as e:
-            print(f"Failed to connect to headset: {e}")
+            logger.error(f"Failed to connect to headset: {e}")
             return False
     
     def _handle_raw(self, headset, raw_value):
@@ -56,7 +59,7 @@ class MindwaveConnection:
         
         self.running = True
         
-        print("Started processing Mindwave data")
+        logger.info("Started processing Mindwave data")
         return True
     
     def stop(self):
@@ -65,15 +68,15 @@ class MindwaveConnection:
         
         if self.headset:
             self.headset.stop()
-            print("Disconnected from Mindwave headset")
+            logger.info("Disconnected from Mindwave headset")
     
     def get_current_window(self):
-        """Get the data from the current window."""
-        return self.buffer.current_window
+        """Get the data from the current window safely."""
+        return self.buffer.get_current_window_copy()
     
     def get_buffer(self):
-        """Get all data from the buffer."""
-        return self.buffer.buffer
+        """Get all data from the buffer safely."""
+        return self.buffer.get_buffer_copy()
     
     def is_connected(self):
         """Check if the headset is connected and running."""

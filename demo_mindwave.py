@@ -3,43 +3,33 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
+import argparse
+import logging
 from mindwave_connection import MindwaveConnection
+from filters import smooth_signal
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 PREVIEW_SECONDS = 5
-
-def apply_filter(data, window_size):
-    """Apply a simple moving average filter to the data"""
-    if window_size <= 1:
-        return data
-    
-    window_size = int(window_size)
-    filtered_data = np.copy(data)
-    
-    # Apply moving average filter
-    for i in range(len(data)):
-        # Determine window boundaries
-        left = max(0, i - window_size // 2)
-        right = min(len(data), i + window_size // 2 + 1)
-        # Calculate average of values within window
-        if right > left:
-            filtered_data[i] = np.mean(data[left:right])
-    
-    return filtered_data
+MAX_HISTORY_SECONDS = PREVIEW_SECONDS + 2 # Keep a small buffer to avoid memory leaks
 
 def main():
-    # Replace with your actual device path
-    device_path = "COM4"  # Windows example
-    # device_path = "/dev/ttyUSB0"  # Linux example
+    parser = argparse.ArgumentParser(description='Mindwave Real-time Demo')
+    parser.add_argument('--port', type=str, default='COM4', help='Serial port for Mindwave headset (e.g. COM4, /dev/ttyUSB0)')
+    args = parser.parse_args()
     
-    # Create connection with 2-second windows
+    device_path = args.port
+    
+    # Create connection
     connection = MindwaveConnection(device_path)
     
-    print("Connecting to Mindwave headset...")
+    logger.info("Connecting to Mindwave headset...")
     if not connection.connect():
-        print("Failed to connect to headset. Please check the device path and try again.")
+        logger.error("Failed to connect to headset. Please check the device path and try again.")
         return
     
-    print("Starting data collection. Press Ctrl+C to stop.")
+    logger.info("Starting data collection. Close plot window to stop.")
     connection.start()
     
     # Set up the figure and axes for plotting with space for slider
@@ -99,7 +89,7 @@ def main():
         return raw_line, attention_line, meditation_line
     
     def update_plot(frame):
-        nonlocal processed_windows
+        nonlocal processed_windows, time_points, all_raw_data, all_attention_data, all_meditation_data
         current_time = time.time() - start_time
         
         # Get all buffer windows and the current window
@@ -107,8 +97,9 @@ def main():
         current_window = connection.get_current_window()
         
         # Process any new complete windows from the buffer
-        for i, window in enumerate(buffer):
-            if i not in processed_windows:
+        # buffer items are now tuples: (window_id, window)
+        for i, (window_id, window) in enumerate(buffer):
+            if window_id not in processed_windows:
                 # This is a new complete window we haven't processed yet
                 window_time = current_time - (len(buffer) - i) * 0.5  # Approximate time offset (adjust as needed)
                 time_step = 0.5 / len(window) if window else 0.01  # Distribute samples within the window
@@ -120,7 +111,10 @@ def main():
                     all_attention_data.append(sample[1])
                     all_meditation_data.append(sample[2])
                 
-                processed_windows.add(i)
+                processed_windows.add(window_id)
+                # Keep processed_windows small to prevent memory leak
+                if len(processed_windows) > 100:
+                    processed_windows.remove(min(processed_windows))
         
         # Process current window (in progress)
         if current_window and len(current_window) > 0:
@@ -141,29 +135,46 @@ def main():
         # Sort data by time to ensure correct plotting order
         if time_points:
             sorted_indices = np.argsort(time_points)
-            time_points_sorted = [time_points[i] for i in sorted_indices]
-            raw_data_sorted = [all_raw_data[i] for i in sorted_indices]
-            attention_data_sorted = [all_attention_data[i] for i in sorted_indices]
-            meditation_data_sorted = [all_meditation_data[i] for i in sorted_indices]
+            time_points[:] = [time_points[idx] for idx in sorted_indices]
+            all_raw_data[:] = [all_raw_data[idx] for idx in sorted_indices]
+            all_attention_data[:] = [all_attention_data[idx] for idx in sorted_indices]
+            all_meditation_data[:] = [all_meditation_data[idx] for idx in sorted_indices]
             
-            # Limit data to last PREVIEW_SECONDS seconds
+            # Prevent memory leak by truncating lists
+            truncate_time = current_time - MAX_HISTORY_SECONDS
+            trunc_index = 0
+            for i, t in enumerate(time_points):
+                if t >= truncate_time:
+                    trunc_index = i
+                    break
+                    
+            if trunc_index > 0:
+                time_points[:] = time_points[trunc_index:]
+                all_raw_data[:] = all_raw_data[trunc_index:]
+                all_attention_data[:] = all_attention_data[trunc_index:]
+                all_meditation_data[:] = all_meditation_data[trunc_index:]
+
+            # Limit data to last PREVIEW_SECONDS seconds for display
             cutoff_time = current_time - PREVIEW_SECONDS
             cutoff_index = 0
-            for i, t in enumerate(time_points_sorted):
+            for i, t in enumerate(time_points):
                 if t >= cutoff_time:
                     cutoff_index = i
                     break
             
-            display_times = time_points_sorted[cutoff_index:]
-            display_raw = raw_data_sorted[cutoff_index:]
-            display_attention = attention_data_sorted[cutoff_index:]
-            display_meditation = meditation_data_sorted[cutoff_index:]
+            display_times = time_points[cutoff_index:]
+            display_raw = all_raw_data[cutoff_index:]
+            display_attention = all_attention_data[cutoff_index:]
+            display_meditation = all_meditation_data[cutoff_index:]
             
-            # Apply filter to the raw data based on slider value
-            filter_window_size = filter_slider.val
-            filtered_raw = apply_filter(display_raw, filter_window_size)
+            # Apply optimized filter to the raw data using filters.py
+            filter_window_size = int(filter_slider.val)
+            if filter_window_size > 1 and len(display_raw) > 0:
+                filtered_raw = smooth_signal(np.array(display_raw), filter_window_size)
+            else:
+                filtered_raw = np.array(display_raw)
             
-            # Update plot data - use filtered data for raw values
+            # Update plot data
             raw_line.set_data(display_times, filtered_raw)
             attention_line.set_data(display_times, display_attention)
             meditation_line.set_data(display_times, display_meditation)
@@ -177,7 +188,7 @@ def main():
                 ax3.set_xlim(min_time, max_time)
                 
                 # Adjust y-axis limits for raw data if needed
-                if len(filtered_raw) > 0:  # Fix: check length instead of truthiness
+                if len(filtered_raw) > 0:
                     min_raw = min(filtered_raw)
                     max_raw = max(filtered_raw)
                     padding = (max_raw - min_raw) * 0.1 if max_raw > min_raw else 100
@@ -185,23 +196,22 @@ def main():
         
         return raw_line, attention_line, meditation_line
     
-    # Create animation with faster refresh rate - fix the warning by adding cache_frame_data=False
+    # Create animation with faster refresh rate
     ani = FuncAnimation(fig, update_plot, init_func=init_plot,
-                        interval=50, blit=True, cache_frame_data=False)  # 50ms refresh for smoother plotting
+                        interval=50, blit=True, cache_frame_data=False)
     
     # Make sure figure layout is adjusted to accommodate all elements
-    fig.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust to make room for title and slider
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     
     try:
         # Show the plot and keep it updating
-        plt.show(block=True)  # Using block=True for better performance
+        plt.show(block=True)
             
     except KeyboardInterrupt:
-        print("Data collection stopped by user.")
+        logger.info("Data collection stopped by user.")
     finally:
         connection.stop()
-        print("Disconnected from headset.")
-        print("Closing connection...")
+        logger.info("Disconnected from headset.")
         plt.close(fig)
 
 if __name__ == "__main__":
